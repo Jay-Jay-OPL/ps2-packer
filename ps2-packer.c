@@ -19,6 +19,7 @@
 
 #include <stdlib.h>
 #include <unistd.h>
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <getopt.h>
@@ -38,6 +39,10 @@
 
 #ifdef _WIN32
 #define snprintf(buffer, size, args...) sprintf(buffer, args)
+#endif
+
+#ifdef __MINGW32__
+#include <windows.h>
 #endif
 
 /* These global variables should contain the data about the loaded stub */
@@ -95,7 +100,7 @@ void printv(char * fmt, ...) {
 
 #ifndef PS2_PACKER_LITE
 typedef int (*pack_section_t)(const u8 * source, u8 ** dest, u32 source_size);
-pack_section_t pack_section;
+pack_section_t ppack_section;
 typedef u32 (*signature_t)();
 signature_t signature;
 #endif
@@ -235,9 +240,9 @@ void show_usage() {
 	"    -b base        sets the loading base of the compressed data. When activated\n"
 	"                     it will activate the alternative packing way.\n"
 #ifndef PS2_PACKER_LITE
-        "    -p packer      sets a packer name. n2e by default.\n"
-	"    -s stub        sets another uncruncher stub. stub/n2e-asm-1d00-stub,\n"
-	"                     or stub/n2e-0088-stub when using alternative packing.\n"
+        "    -p packer      sets a packer name. lzma by default.\n"
+	"    -s stub        sets another uncruncher stub. stub/lzma-1d00-stub by default,\n"
+	"                     or stub/lzma-0088-stub when using alternative packing.\n"
 #endif
 	"    -r reload      sets a reload base of the stub. Beware, that will only works\n"
 	"                     with the special asm stubs.\n"
@@ -255,9 +260,9 @@ void remove_section_zeroes(u8 * section, u32 * section_size, u32 * zeroes) {
     u32 removed = 0;
 
     while (!section[*section_size - 1 - removed]) {
+	removed++;
 	if (*section_size == removed)
 	    break;
-	removed++;
     }
 
 #if 0
@@ -326,12 +331,7 @@ int count_sections(FILE * stub) {
 }
 
 #ifdef PS2_PACKER_LITE
-#ifdef __MINGW32__
-#include "mingw-builtin_stub_one.h"
-#include "mingw-builtin_stub.h"
-#endif
-extern u8 _binary_b_stub_one_start[];
-extern u8 _binary_b_stub_start[];
+extern u8 builtin_stub[];
 #endif
 
 /* Loads the stub file in memory, filling up the global variables */
@@ -357,11 +357,7 @@ void load_stub(
       printe("fread error\n");
     }
 #else
-    if (sections == 1) {
-	loadbuf = _binary_b_stub_one_start;
-    } else {
-	loadbuf = _binary_b_stub_start;
-    }
+    loadbuf = builtin_stub;
 #endif
 
     eh = (elf_header_t *)loadbuf;
@@ -378,7 +374,7 @@ void load_stub(
     eph = (elf_pheader_t *)(loadbuf + eh->phoff);
     for (i = 0; i < eh->phnum; i++) {
 	SWAP_ELF_PHEADER(eph[i]);
-        if (eph[i].type != PT_LOAD)
+        if ((eph[i].type != PT_LOAD) || (eph[i].filesz == 0))
             continue;
 
         pdata = (loadbuf + eph[i].offset);
@@ -534,7 +530,7 @@ void packing(FILE * out, FILE * in, u32 base, int use_asm_n2e) {
     /* counting and swapping the program headers of the input file */
     for (i = 0; i < eh->phnum; i++) {
 	SWAP_ELF_PHEADER(eph[i]);
-        if (eph[i].type != PT_LOAD)
+        if ((eph[i].type != PT_LOAD) || (eph[i].filesz == 0))
             continue;
 	ph.numSections++;
     }
@@ -567,9 +563,14 @@ void packing(FILE * out, FILE * in, u32 base, int use_asm_n2e) {
 	remove_section_zeroes(pdata, &section_size, &psh.zeroByteSize);
 	printv("Loaded section: %08X bytes (with %08X zeroes) based at %08X\n", psh.originalSize, psh.zeroByteSize, psh.virtualAddr);
 
-	psh.compressedSize = packed_size = pack_section(pdata, &packed, section_size);
+#ifndef PS2_PACKER_LITE
+	packed_size = ppack_section(pdata, &packed, section_size);
+#else
+	packed_size = pack_section(pdata, &packed, section_size);
+#endif
+	psh.compressedSize = packed_size;
 
-	printv("Section packed, from %u to %u bytes, ratio = %5.2f%%\n", section_size, packed_size, 100.0 * (section_size - packed_size) / section_size);
+	printv("Section packed, from %u to %u bytes, ratio = %5.2f%%\n", section_size, packed_size, 100.0 * (int) (section_size - packed_size) / section_size);
 
 	SWAP_PACKED_SECTION_HEADER(psh);
 	if (use_asm_n2e == 2) {  // we don't need compressed size
@@ -663,11 +664,15 @@ int main(int argc, char ** argv) {
     u32 size_in, size_out;
     int use_asm_n2e = 0;
     char * pwd;
+    char pwd_buf[BUFSIZ + 1];
+
+    setbuf(stdout, NULL);
 
     sanity_checks();
 
     show_banner();
 
+    strncpy(pwd_buf, argv[0], BUFSIZ);
     if ((pwd = strrchr(argv[0], '/'))) {
 	*pwd = 0;
     } else if ((pwd = strrchr(argv[0], '\\'))) {
@@ -675,6 +680,15 @@ int main(int argc, char ** argv) {
     }
 
     pwd = argv[0];
+#ifdef __MINGW32__
+    if (strcmp(pwd_buf, argv[0]) == 0) {
+        if (GetModuleFileName(NULL, pwd_buf, BUFSIZ)) {
+            if ((pwd = strrchr(pwd_buf, '\\')))
+                *pwd = 0;
+            pwd = pwd_buf;
+        }
+    }
+#endif
 
     while ((c = getopt_long(argc, argv, "b:a:"
 #ifndef PS2_PACKER_LITE
@@ -683,11 +697,11 @@ int main(int argc, char ** argv) {
 		"hvr:", long_options, NULL)) != EOF) {
 	switch (c) {
 	case 'b':
-	    base = strtol(optarg, NULL, 0);
+	    base = strtoul(optarg, NULL, 0);
 	    alternative = 1;
 	    break;
 	case 'a':
-	    alignment = strtol(optarg, NULL, 0);
+	    alignment = strtoul(optarg, NULL, 0);
 	    break;
 #ifndef PS2_PACKER_LITE
 	case 'p':
@@ -698,7 +712,7 @@ int main(int argc, char ** argv) {
 	    break;
 #endif
 	case 'r':
-	    reload = strtol(optarg, NULL, 0);
+	    reload = strtoul(optarg, NULL, 0);
 	    break;
 	case 'v':
 	    verbose = 1;
@@ -709,7 +723,7 @@ int main(int argc, char ** argv) {
 	default:
 	    printf("Unknown option %c\n\n", c);
 	    show_usage();
-	    exit(-1);
+	    exit(EINVAL);
 	}
     }
 
@@ -717,8 +731,9 @@ int main(int argc, char ** argv) {
         printv("Using alternative packing method.\n");
 
     if ((argc - optind) != 2) {
-	printf("%i files specified, I need exactly 2.\n\n", argc - optind);
+	printe("%i files specified, I need exactly 2.\n\n", argc - optind);
 	show_usage();
+    exit(EINVAL);
     }
 
     in_name = argv[optind++];
@@ -736,7 +751,7 @@ int main(int argc, char ** argv) {
 
 #ifndef PS2_PACKER_LITE
     if (!packer_name) {
-	packer_name = "n2e";
+	packer_name = "lzma";
     }
 
     if (!stub_name) {
@@ -763,7 +778,10 @@ int main(int argc, char ** argv) {
     if (!file_exists(stub_name)) {
         snprintf(buffer, BUFSIZ, PREFIX "/share/ps2-packer/%s", stub_name);
 	if (!file_exists(buffer)) {
+    	    snprintf(buffer, BUFSIZ, "%s/../share/ps2-packer/%s", pwd, stub_name);
+	if (!file_exists(buffer)) {
     	    snprintf(buffer, BUFSIZ, "%s/%s", pwd, stub_name);
+        }
         }
 	free(stub_name);
 	stub_name = strdup(buffer);
@@ -775,30 +793,32 @@ int main(int argc, char ** argv) {
 
     snprintf(buffer, BUFSIZ, PREFIX "/share/ps2-packer/module/%s-packer" SUFFIX, packer_name);
     if (!file_exists(buffer)) {
+    snprintf(buffer, BUFSIZ, "%s/../share/ps2-packer/module/%s-packer" SUFFIX, pwd, packer_name);
+    if (!file_exists(buffer)) {
 	snprintf(buffer, BUFSIZ, "%s/%s-packer" SUFFIX, pwd, packer_name);
 	if (!file_exists(buffer))
 	    snprintf(buffer, BUFSIZ, "./%s-packer" SUFFIX, packer_name);
     }
+    }
 
     packer_dll = strdup(buffer);
-#else
-    use_asm_n2e = ((sections == 1) ? 2 : 1);
 #endif
 
     printf("Compressing %s...\n", in_name);
 
-    printv("Loading stub file.\n");
 #ifndef PS2_PACKER_LITE
+    printv("Loading stub file %s.\n", stub_name);
     load_stub(stub_file);
     fclose(stub_file);
 #else
+    printv("Loading stub file.\n");
     load_stub();
 #endif
 
 #ifndef PS2_PACKER_LITE
-    printv("Opening packer.\n");
+    printv("Opening packer %s.\n", packer_dll);
     packer_module = open_module(packer_dll);
-    pack_section = get_symbol(packer_module, "pack_section");
+    ppack_section = get_symbol(packer_module, "pack_section");
     signature = get_symbol(packer_module, "signature");
     if (signature() != stub_signature) {
 	printe("Packer's signature and stub's signature are not matching.\n");

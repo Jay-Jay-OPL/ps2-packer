@@ -20,7 +20,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <zlib.h>
+#include "Alloc.h"
+#include "LzmaEnc.h"
 #include "common.h"
 
 static void printe(char * fmt, ...) {
@@ -32,40 +33,37 @@ static void printe(char * fmt, ...) {
 }
 
 int pack_section(const u8 * source, u8 ** dest, u32 source_size) {
-    u32 packed_size;
+    size_t propsSize, packed_size;
     u8 * packed;
-    z_stream c_stream;
-    
+    CLzmaEncProps props;
+    SRes res;
+
+    propsSize = LZMA_PROPS_SIZE;
     packed_size = source_size * 1.2 + 2048;
-    packed = (u8 *) malloc(packed_size);
-	
-    c_stream.zalloc = (alloc_func)0;
-    c_stream.zfree = (free_func)0;
-    c_stream.opaque = (voidpf)0;
-	
-    if (deflateInit(&c_stream, 9) != Z_OK)
-        printe("Error during deflateInit.\n");
-	
-    c_stream.next_in = (u8*)source;
-    c_stream.avail_in = source_size;
-    c_stream.next_out = packed;
-    c_stream.avail_out = packed_size;
+    packed = (u8 *) malloc(propsSize + packed_size);
 
-    if (deflate(&c_stream, Z_FINISH) != Z_STREAM_END)
-        printe("Error during deflate.\n");
-	
-    if (deflateEnd(&c_stream) != Z_OK)
-        printe("Error during deflateEnd.\n");
+    LzmaEncProps_Init(&props);
+    props.level = 9;
+    props.dictSize = 1 << 22; /* 4194304 Bytes */
+    props.writeEndMark = 1;
+    props.reduceSize = source_size;
 
-    packed_size = c_stream.total_out;
+    res = LzmaEncode(
+        &packed[LZMA_PROPS_SIZE], &packed_size,
+        &source[0], source_size,
+        &props, &packed[0], &propsSize, props.writeEndMark,
+        NULL, &g_Alloc, &g_BigAlloc);
 
-    packed = realloc(packed, packed_size);
+    if ((res != SZ_OK) || (propsSize != LZMA_PROPS_SIZE))
+        printe("Error during LzmaEncode.\n");
+
+    packed = realloc(packed, propsSize + packed_size);
 
     *dest = packed;
 
-    return packed_size;
+    return propsSize + packed_size;
 }
 
 u32 signature() {
-    return 0x42494c5a;
+    return 0x414d5a4c;
 }

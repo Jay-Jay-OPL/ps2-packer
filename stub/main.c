@@ -19,7 +19,7 @@ static void fast_memzero(u8 * ptr, u32 size) {
 	"\tnop\n"
 	"\tnop\n"
 	"\tsb        $0, 0(%1)\n"
-	"\tsltu      %2, %0, %1\n"
+	"\tsltu      %2, %1, %0\n"
 	"\taddiu     %1, 1\n"
 	"\tbnez      %2, 1b\n"
 	: "=r" (t) : "r" (ptr), "r" (size)
@@ -74,7 +74,7 @@ int main(int argc, char ** argv) {
     	    fast_memzero((void *)(sectionHeader->virtualAddr + sectionHeader->originalSize), sectionHeader->zeroByteSize);
 	compressedData += sectionHeader->compressedSize;
 	if (((u32) compressedData) & 3)
-	    compressedData = (u32 *) ((((u32)compressedData) | 3) + 1);
+	    compressedData = (u8 *) ((((u32)compressedData) | 3) + 1);
     }
     
 #ifdef DEBUG
